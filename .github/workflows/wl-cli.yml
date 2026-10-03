@@ -1,0 +1,106 @@
+# Workload "cli": cli/cli@v2.102.0 (fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd)
+# Adapted from upstream .github/workflows/go.yml, job "build (ubuntu-latest)". Changes from upstream are marked "PORTABILITY" and are
+# identical for every provider. See suite/cli/README.md.
+name: wl-cli
+run-name: ${{ inputs.tag }}
+on:
+  workflow_dispatch:
+    inputs:
+      runs_on:
+        description: runs-on label of the provider under test
+        type: string
+        required: true
+      tag:
+        description: run identifier assigned by the harness (shown as the run name)
+        type: string
+        required: true
+      split:
+        description: Track B only - run the test step through vitko-inc/split-tests (on other runners it runs all tests in one part)
+        type: boolean
+        default: false
+      checkpoint:
+        description: Track B only - add the checkpoint step (warm starts) after the setup steps
+        type: boolean
+        default: false
+      accel:
+        description: Provider-recommended accelerator to enable (for example runson, blacksmith); empty for none
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      runs_on:
+        description: runs-on label of the provider under test
+        type: string
+        required: true
+      tag:
+        description: run identifier assigned by the harness (shown as the run name)
+        type: string
+        required: true
+      split:
+        description: Track B only - run the test step through vitko-inc/split-tests (on other runners it runs all tests in one part)
+        type: boolean
+        default: false
+      checkpoint:
+        description: Track B only - add the checkpoint step (warm starts) after the setup steps
+        type: boolean
+        default: false
+      accel:
+        description: Provider-recommended accelerator to enable (for example runson, blacksmith); empty for none
+        type: string
+        default: ''
+permissions:
+  contents: read
+jobs:
+  build:
+    name: cli build (ubuntu)
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 45
+    env:
+      # PORTABILITY (source-keyed caches): the same commit runs every time, so Go's test-result
+      # cache would report every package "(cached)". -count=1 disables only the result cache;
+      # module and build caches (setup-go) are kept.
+      GOFLAGS: -count=1
+    steps:
+      - name: rb-probe
+        shell: bash
+        run: |
+          m=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
+          case "$m" in *EPYC*) fam="AMD EPYC";; *Ryzen*) fam="AMD Ryzen";; *Xeon*|*XEON*) fam="Intel Xeon";; *Intel*) fam="Intel";; *AMD*) fam="AMD";; *) fam="other";; esac
+          ghz=$(awk -F: '/cpu MHz/{printf "%.1f", $2/1000; exit}' /proc/cpuinfo)
+          echo "rb-probe cpu=\"$fam\" ghz=${ghz:-unknown} nproc=$(nproc) mem_kib=$(awk '/MemTotal/{print $2}' /proc/meminfo) swap_kib=$(awk '/SwapTotal/{print $2}' /proc/meminfo)"
+      # Provider accelerator (RunsOn): its documented S3-backed cache sidecar. Runs only when asked.
+      - name: RunsOn cache sidecar
+        if: ${{ inputs.accel == 'runson' }}
+        uses: runs-on/action@17b59092eb37ebfdbb034460892887c09100eaa3 # v2.5.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: cli/cli
+          ref: fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd # v2.102.0
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+      - name: Download dependencies
+        run: go mod download
+      # Track B (warm starts): save the setup above from runs of the default branch; later jobs start
+      # with it in place. On other runners, and when the input is off, nothing happens.
+      - name: Checkpoint (warm starts)
+        if: ${{ inputs.checkpoint }}
+        uses: vitko-inc/checkpoint@a06aa88487d9cae4dee4eb50efffb8924ca99e78 # v1.0.3
+      - name: Run unit and integration tests
+        if: ${{ !inputs.split }}
+        run: go test -race -tags=integration ./...
+      # Track B (split): the attestation tests that call the public Sigstore services need the
+      # network, which split parts don't have. They're excluded from the split step and run unsplit
+      # in the next step of the same job, so the job does the same work as the other arms.
+      - name: Run unit and integration tests (split)
+        if: ${{ inputs.split }}
+        uses: vitko-inc/split-tests@310d103be21c9530234e76f790d448f5c42e9b83 # v1.0.6
+        with:
+          run: go test -race -tags=integration -skip '^(TestLiveSigstoreVerifier.*|TestVerifyAttestations|TestVerifyIntegration.*|TestNewInspectCmd_PrintOutputJSONFormat|TestChooseVerifier.*)$' ./...
+      - name: Run the network-dependent attestation tests (split arm, unsplit)
+        if: ${{ inputs.split }}
+        run: go test -race -tags=integration -run '^(TestLiveSigstoreVerifier.*|TestVerifyAttestations|TestVerifyIntegration.*|TestNewInspectCmd_PrintOutputJSONFormat|TestChooseVerifier.*)$' ./pkg/cmd/attestation/...
+      - name: Build
+        run: go build -v ./cmd/gh

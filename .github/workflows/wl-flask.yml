@@ -1,0 +1,95 @@
+# Workload "flask": pallets/flask@3.1.3 (22d924701a6ae2e4cd01e9a15bbaf3946094af65)
+# Adapted from upstream .github/workflows/tests.yaml, job "tests (3.13)". Changes from upstream are marked "PORTABILITY" and are
+# identical for every provider. See suite/flask/README.md.
+name: wl-flask
+run-name: ${{ inputs.tag }}
+on:
+  workflow_dispatch:
+    inputs:
+      runs_on:
+        description: runs-on label of the provider under test
+        type: string
+        required: true
+      tag:
+        description: run identifier assigned by the harness (shown as the run name)
+        type: string
+        required: true
+      split:
+        description: Track B only - run the test step through vitko-inc/split-tests (on other runners it runs all tests in one part)
+        type: boolean
+        default: false
+      checkpoint:
+        description: Track B only - add the checkpoint step (warm starts) after the setup steps
+        type: boolean
+        default: false
+      accel:
+        description: Provider-recommended accelerator to enable (for example runson, blacksmith); empty for none
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      runs_on:
+        description: runs-on label of the provider under test
+        type: string
+        required: true
+      tag:
+        description: run identifier assigned by the harness (shown as the run name)
+        type: string
+        required: true
+      split:
+        description: Track B only - run the test step through vitko-inc/split-tests (on other runners it runs all tests in one part)
+        type: boolean
+        default: false
+      checkpoint:
+        description: Track B only - add the checkpoint step (warm starts) after the setup steps
+        type: boolean
+        default: false
+      accel:
+        description: Provider-recommended accelerator to enable (for example runson, blacksmith); empty for none
+        type: string
+        default: ''
+permissions:
+  contents: read
+jobs:
+  tests:
+    name: flask tests (3.13)
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 30
+    steps:
+      - name: rb-probe
+        shell: bash
+        run: |
+          m=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
+          case "$m" in *EPYC*) fam="AMD EPYC";; *Ryzen*) fam="AMD Ryzen";; *Xeon*|*XEON*) fam="Intel Xeon";; *Intel*) fam="Intel";; *AMD*) fam="AMD";; *) fam="other";; esac
+          ghz=$(awk -F: '/cpu MHz/{printf "%.1f", $2/1000; exit}' /proc/cpuinfo)
+          echo "rb-probe cpu=\"$fam\" ghz=${ghz:-unknown} nproc=$(nproc) mem_kib=$(awk '/MemTotal/{print $2}' /proc/meminfo) swap_kib=$(awk '/SwapTotal/{print $2}' /proc/meminfo)"
+      # Provider accelerator (RunsOn): its documented S3-backed cache sidecar. Runs only when asked.
+      - name: RunsOn cache sidecar
+        if: ${{ inputs.accel == 'runson' }}
+        uses: runs-on/action@17b59092eb37ebfdbb034460892887c09100eaa3 # v2.5.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pallets/flask
+          ref: 22d924701a6ae2e4cd01e9a15bbaf3946094af65 # 3.1.3
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@61cb8a9741eeb8a550a1b8544337180c0fc8476b # v7.2.0
+        with:
+          enable-cache: true
+          prune-cache: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13'
+      # Track B (warm starts): save the setup above from runs of the default branch; later jobs start
+      # with it in place. On other runners, and when the input is off, nothing happens.
+      - name: Checkpoint (warm starts)
+        if: ${{ inputs.checkpoint }}
+        uses: vitko-inc/checkpoint@a06aa88487d9cae4dee4eb50efffb8924ca99e78 # v1.0.3
+      - if: ${{ !inputs.split }}
+        run: uv run --locked tox run -e py3.13
+      - if: ${{ inputs.split }}
+        uses: vitko-inc/split-tests@310d103be21c9530234e76f790d448f5c42e9b83 # v1.0.6
+        with:
+          # The parts have no network: tox builds the env (and flask) in prepare, with network,
+          # then each part runs pytest in that env, as tox's own test command does.
+          prepare: uv run --locked tox run -e py3.13 --notest
+          run: .tox/py3.13/bin/python -m pytest -v --tb=short

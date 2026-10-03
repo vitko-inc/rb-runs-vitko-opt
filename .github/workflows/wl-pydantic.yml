@@ -1,0 +1,108 @@
+# Workload "pydantic": pydantic/pydantic@v2.13.5 (001dea020e0809844e5b17666432c9135a976f46)
+# Adapted from upstream .github/workflows/ci.yml, job "Test ubuntu-latest / 3.13". Changes from upstream are marked "PORTABILITY" and are
+# identical for every provider. See suite/pydantic/README.md.
+name: wl-pydantic
+run-name: ${{ inputs.tag }}
+on:
+  workflow_dispatch:
+    inputs:
+      runs_on:
+        description: runs-on label of the provider under test
+        type: string
+        required: true
+      tag:
+        description: run identifier assigned by the harness (shown as the run name)
+        type: string
+        required: true
+      split:
+        description: Track B only - run the test step through vitko-inc/split-tests (on other runners it runs all tests in one part)
+        type: boolean
+        default: false
+      checkpoint:
+        description: Track B only - add the checkpoint step (warm starts) after the setup steps
+        type: boolean
+        default: false
+      accel:
+        description: Provider-recommended accelerator to enable (for example runson, blacksmith); empty for none
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      runs_on:
+        description: runs-on label of the provider under test
+        type: string
+        required: true
+      tag:
+        description: run identifier assigned by the harness (shown as the run name)
+        type: string
+        required: true
+      split:
+        description: Track B only - run the test step through vitko-inc/split-tests (on other runners it runs all tests in one part)
+        type: boolean
+        default: false
+      checkpoint:
+        description: Track B only - add the checkpoint step (warm starts) after the setup steps
+        type: boolean
+        default: false
+      accel:
+        description: Provider-recommended accelerator to enable (for example runson, blacksmith); empty for none
+        type: string
+        default: ''
+permissions:
+  contents: read
+jobs:
+  test:
+    name: pydantic test (3.13)
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 45
+    env:
+      OS: ubuntu-latest
+      DEPS: yes
+      UV_PYTHON_PREFERENCE: only-managed
+    steps:
+      - name: rb-probe
+        shell: bash
+        run: |
+          m=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
+          case "$m" in *EPYC*) fam="AMD EPYC";; *Ryzen*) fam="AMD Ryzen";; *Xeon*|*XEON*) fam="Intel Xeon";; *Intel*) fam="Intel";; *AMD*) fam="AMD";; *) fam="other";; esac
+          ghz=$(awk -F: '/cpu MHz/{printf "%.1f", $2/1000; exit}' /proc/cpuinfo)
+          echo "rb-probe cpu=\"$fam\" ghz=${ghz:-unknown} nproc=$(nproc) mem_kib=$(awk '/MemTotal/{print $2}' /proc/meminfo) swap_kib=$(awk '/SwapTotal/{print $2}' /proc/meminfo)"
+      # Provider accelerator (RunsOn): its documented S3-backed cache sidecar. Runs only when asked.
+      - name: RunsOn cache sidecar
+        if: ${{ inputs.accel == 'runson' }}
+        uses: runs-on/action@17b59092eb37ebfdbb034460892887c09100eaa3 # v2.5.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pydantic/pydantic
+          ref: 001dea020e0809844e5b17666432c9135a976f46 # v2.13.5
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.13'
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --all-packages --group testing-extra --all-extras
+      # Track B (warm starts): save the setup above from runs of the default branch; later jobs start
+      # with it in place. On other runners, and when the input is off, nothing happens.
+      - name: Checkpoint (warm starts)
+        if: ${{ inputs.checkpoint }}
+        uses: vitko-inc/checkpoint@a06aa88487d9cae4dee4eb50efffb8924ca99e78 # v1.0.3
+      - run: 'uv run python -c "import pydantic.version; print(pydantic.version.version_info())"'
+      - run: mkdir coverage
+      - name: Run pytest
+        if: ${{ !inputs.split }}
+        # PORTABILITY: GitHub's runner image sets a 16 MiB stack limit; stock Ubuntu (and other
+        # runner images) use 8 MiB, where upstream's recursion test overflows the stack.
+        run: |
+          ulimit -s 16384
+          make test NUM_THREADS=1
+        env:
+          COVERAGE_FILE: coverage/.coverage.Linux-py3.13
+          CONTEXT: Linux-py3.13-without-deps
+      - name: Run pytest (split)
+        if: ${{ inputs.split }}
+        uses: vitko-inc/split-tests@310d103be21c9530234e76f790d448f5c42e9b83 # v1.0.6
+        with:
+          run: bash -c 'ulimit -s 16384 && uv run --no-sync pytest --durations=10'
+      # PORTABILITY: upstream uploads coverage files as an artifact for a later combine job; that
+      # job is not part of this workload, so the upload is omitted.

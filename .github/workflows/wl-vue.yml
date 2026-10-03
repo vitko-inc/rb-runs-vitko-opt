@@ -1,0 +1,102 @@
+# Workload "vue": vuejs/core@v3.5.43 (5be58b4c475c1d14b4abacbfeda610394a0ee4e5)
+# Adapted from upstream .github/workflows/test.yml, job "unit-test". Changes from upstream are marked "PORTABILITY" and are
+# identical for every provider. See suite/vue/README.md.
+name: wl-vue
+run-name: ${{ inputs.tag }}
+on:
+  workflow_dispatch:
+    inputs:
+      runs_on:
+        description: runs-on label of the provider under test
+        type: string
+        required: true
+      tag:
+        description: run identifier assigned by the harness (shown as the run name)
+        type: string
+        required: true
+      split:
+        description: Track B only - run the test step through vitko-inc/split-tests (on other runners it runs all tests in one part)
+        type: boolean
+        default: false
+      checkpoint:
+        description: Track B only - add the checkpoint step (warm starts) after the setup steps
+        type: boolean
+        default: false
+      accel:
+        description: Provider-recommended accelerator to enable (for example runson, blacksmith); empty for none
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      runs_on:
+        description: runs-on label of the provider under test
+        type: string
+        required: true
+      tag:
+        description: run identifier assigned by the harness (shown as the run name)
+        type: string
+        required: true
+      split:
+        description: Track B only - run the test step through vitko-inc/split-tests (on other runners it runs all tests in one part)
+        type: boolean
+        default: false
+      checkpoint:
+        description: Track B only - add the checkpoint step (warm starts) after the setup steps
+        type: boolean
+        default: false
+      accel:
+        description: Provider-recommended accelerator to enable (for example runson, blacksmith); empty for none
+        type: string
+        default: ''
+permissions:
+  contents: read
+jobs:
+  unit-test:
+    name: vue unit-test
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 30
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+    steps:
+      - name: rb-probe
+        shell: bash
+        run: |
+          m=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
+          case "$m" in *EPYC*) fam="AMD EPYC";; *Ryzen*) fam="AMD Ryzen";; *Xeon*|*XEON*) fam="Intel Xeon";; *Intel*) fam="Intel";; *AMD*) fam="AMD";; *) fam="other";; esac
+          ghz=$(awk -F: '/cpu MHz/{printf "%.1f", $2/1000; exit}' /proc/cpuinfo)
+          echo "rb-probe cpu=\"$fam\" ghz=${ghz:-unknown} nproc=$(nproc) mem_kib=$(awk '/MemTotal/{print $2}' /proc/meminfo) swap_kib=$(awk '/SwapTotal/{print $2}' /proc/meminfo)"
+      # Provider accelerator (RunsOn): its documented S3-backed cache sidecar. Runs only when asked.
+      - name: RunsOn cache sidecar
+        if: ${{ inputs.accel == 'runson' }}
+        uses: runs-on/action@17b59092eb37ebfdbb034460892887c09100eaa3 # v2.5.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: vuejs/core
+          ref: 5be58b4c475c1d14b4abacbfeda610394a0ee4e5 # v3.5.43
+          persist-credentials: false
+      # PORTABILITY: set up Node before pnpm, so pnpm's installer never runs on a runner image's
+      # own (possibly older) Node. The second setup-node call is upstream's (with the pnpm cache).
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.node-version'
+      - name: Install pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.node-version'
+          cache: 'pnpm'
+      - run: pnpm install
+      # Track B (warm starts): save the setup above from runs of the default branch; later jobs start
+      # with it in place. On other runners, and when the input is off, nothing happens.
+      - name: Checkpoint (warm starts)
+        if: ${{ inputs.checkpoint }}
+        uses: vitko-inc/checkpoint@a06aa88487d9cae4dee4eb50efffb8924ca99e78 # v1.0.3
+      - name: Run unit tests
+        if: ${{ !inputs.split }}
+        run: pnpm run test-unit
+      - name: Run unit tests (split)
+        if: ${{ inputs.split }}
+        uses: vitko-inc/split-tests@310d103be21c9530234e76f790d448f5c42e9b83 # v1.0.6
+        with:
+          run: pnpm exec vitest run --project unit
